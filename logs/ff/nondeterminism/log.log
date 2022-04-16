@@ -1,0 +1,17 @@
+nondeterminism_rate=0.0, accounts=50000
+tps: ave:  20852.82090162401
+nondeterminism_rate=0.1, accounts=50000
+tps: ave:  18852.82090162401
+[12118.0, 20530.0, 20600.0, 22726.0]
+nondeterminism_rate=0.2, accounts=50000
+tps: ave:  17807.24327509165
+[15240.0, 17492.0, 20286.0, 22376.0]
+nondeterminism_rate=0.3, accounts=50000
+tps: ave:  15931.455463646938
+[9428.0, 22970.0, 17614.0, 16058.0]
+nondeterminism_rate=0.4, accounts=50000
+tps: ave:  14363.220045496708
+[10032.0, 21082.0, 12504.0, 14172.0]
+nondeterminism_rate=0.5, accounts=50000
+tps: ave:  12197.592865907318
+[10536.0, 13810.0, 18658.0, 6958.0]

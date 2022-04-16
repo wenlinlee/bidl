@@ -1,0 +1,91 @@
+project: fabric
+
+logging: INFO
+network: HLF
+tls: 'false'
+crypto: fabric_exp/organizations
+artifacts: fabric_exp/channel-artifacts
+
+peers: 
+  image: hyperledger/fabric-peer:fabric-2phase 
+  template: peer
+  count: 6
+  bootstrap: 0
+
+orderer:
+  name: orderer
+  host: heming-rdma6
+  image: hyperledger/fabric-orderer:fabric-v3.0 
+
+cli:
+  name: cli
+  image: hyperledger/fabric-tools:fabric-v1.0
+  host: heming-rdma2 # deprecated
+  chaincode: fabric_exp/chaincode
+  scripts: fabric_exp/scripts
+
+tape:
+  name: tape
+  image: tape:latest
+  host: heming-rdma2 # deprecated
+  config: fabric_exp/tape.yaml
+  organizations: fabric_exp/organizations
+
+hosts:
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma5
+  - heming-rdma3
+  - heming-rdma9
+  - heming-rdma19
+  - heming-rdma4
+  - heming-rdma6
+  - heming-rdma8
+  - heming-rdma9
+  - heming-rdma3
+  - heming-rdma19
+  - heming-rdma9
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma6
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma9
+  - heming-rdma6
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma9
+  - heming-rdma6
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma9
+  - heming-rdma6
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma9
+  - heming-rdma6
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma9
+  - heming-rdma6
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma9
+  - heming-rdma6
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma9
+  - heming-rdma6
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma9
+  - heming-rdma6
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma9
+  - heming-rdma6
+  - heming-rdma3
+  - heming-rdma4
+  - heming-rdma9
+  - heming-rdma6
+  - heming-rdma19

@@ -1,0 +1,4 @@
+Submission rate 50 throughput 50 kTxns/s
+Submission rate 50 consensus latency 3 ms
+Submission rate 50 execution latency 7 ms
+Submission rate 50 commit latency 1 ms
