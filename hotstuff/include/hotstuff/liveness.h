@@ -31,13 +31,14 @@ class PaceMaker {
     protected:
     HotStuffCore *hsc;
     public:
-    int do_new_consen_prop_count = 0;
+    size_t blk_size;
 
     virtual ~PaceMaker() = default;
     /** Initialize the PaceMaker. A derived class should also call the
      * default implementation to set `hsc`. */
-    virtual void init(HotStuffCore *_hsc) { 
+    virtual void init(HotStuffCore *_hsc, size_t _blk_size) { 
         hsc = _hsc; 
+        blk_size = _blk_size;
     }
     /** Get a promise resolved when the pace maker thinks it is a *good* time
      * to issue new commands. When promise is resolved, the replica should
@@ -187,8 +188,8 @@ class PMWaitQC: public virtual PaceMaker {
 struct PaceMakerDummy: public PMHighTail, public PMWaitQC {
     PaceMakerDummy(int32_t parent_limit):
         PMHighTail(parent_limit), PMWaitQC() {}
-    void init(HotStuffCore *hsc) override {
-        PaceMaker::init(hsc);
+    void init(HotStuffCore *hsc, size_t blk_size) override {
+        PaceMaker::init(hsc, blk_size);
         PMHighTail::init();
         PMWaitQC::init();
     }
@@ -199,8 +200,7 @@ class PaceMakerDummyFixed: public PaceMakerDummy {
     ReplicaID proposer;
 
     public:
-    PaceMakerDummyFixed(ReplicaID proposer,
-                        int32_t parent_limit):
+    PaceMakerDummyFixed(ReplicaID proposer, int32_t parent_limit):
         PaceMakerDummy(parent_limit),
         proposer(proposer) {}
 
@@ -237,6 +237,8 @@ class PMRoundRobinProposer: virtual public PaceMaker {
     promise_t pm_wait_propose;
     promise_t pm_qc_manual;
 
+
+    // now I am leader, record my proposed block
     void reg_proposal() {
         hsc->async_wait_proposal().then([this](const Proposal &prop) {
             auto &pblk = prop_blk[hsc->get_id()];
@@ -245,6 +247,7 @@ class PMRoundRobinProposer: virtual public PaceMaker {
         });
     }
 
+    // I am a receiver, record the received block
     void reg_receive_proposal() {
         hsc->async_wait_receive_proposal().then([this](const Proposal &prop) {
             auto &pblk = prop_blk[prop.proposer];
@@ -259,11 +262,12 @@ class PMRoundRobinProposer: virtual public PaceMaker {
             auto pm = pending_beats.front();
             pending_beats.pop();
             pm_qc_finish.reject();
-            (pm_qc_finish = hsc->async_qc_finish(last_proposed))
-                .then([this, pm]() {
-                    HOTSTUFF_LOG_PROTO("got QC, propose a new block");
-                    pm.resolve(proposer);
-                });
+
+            (pm_qc_finish = hsc->async_qc_finish(last_proposed)).then([this, pm]() {
+                HOTSTUFF_LOG_PROTO("got QC, propose a new block");
+                pm.resolve(proposer);
+            });
+
             locked = true;
         }
     }
@@ -280,6 +284,7 @@ class PMRoundRobinProposer: virtual public PaceMaker {
     }
 
     void do_new_consensus(int x, const std::vector<uint256_t> &cmds) {
+        HOTSTUFF_LOG_PROTO("Pacemaker: on_propose cmds = %d", cmds.size());
         auto blk = hsc->on_propose(cmds, get_parents(), bytearray_t());
         pm_qc_manual.reject();
         (pm_qc_manual = hsc->async_qc_finish(blk)).then([this, x]() {
@@ -297,12 +302,11 @@ class PMRoundRobinProposer: virtual public PaceMaker {
         if (proposer == hsc->get_id())
             do_new_consensus(0, std::vector<uint256_t>{});
 
-        do_new_consen_prop_count = 3;
         hsc->timer_recv_prop.add(hsc->recv_timeout);
-        HOTSTUFF_LOG_INFO("Pacemaker : Start Timer %d", this->hsc->pmaker_count);
+        HOTSTUFF_LOG_INFO("Pacemaker : new consensus : Start Timer %d", this->hsc->pmaker_count);
 
         timer = TimerEvent(ec, [this](TimerEvent &){ rotate(); });
-        timer.add(prop_delay);
+        timer.add(prop_delay); // if after prop_delay second and no consensus reach, rotate to next leader
     }
 
     /* role transitions */
@@ -314,6 +318,7 @@ class PMRoundRobinProposer: virtual public PaceMaker {
         rotating = true;
         proposer = (proposer + 1) % hsc->get_config().nreplicas;
         HOTSTUFF_LOG_PROTO("Pacemaker: rotate to %d", proposer);
+
         pm_qc_finish.reject();
         pm_wait_propose.reject();
         pm_qc_manual.reject();
@@ -335,8 +340,6 @@ class PMRoundRobinProposer: virtual public PaceMaker {
         last_proposed = hsc->get_genesis();
         proposer_update_last_proposed();
 
-        do_new_consen_prop_count = 4;
-
         if (proposer == hsc->get_id()) {
             auto hs = static_cast<hotstuff::HotStuffBase *>(hsc);
             hs->do_elected();
@@ -344,15 +347,14 @@ class PMRoundRobinProposer: virtual public PaceMaker {
                 auto &pending = hs->get_decision_waiting();
 
                 if (!pending.size()) return;
-
-                HOTSTUFF_LOG_PROTO("reproposing pending commands");
-                hsc->timer_recv_prop.add(hsc->recv_timeout);
-                HOTSTUFF_LOG_INFO("Pacemaker : Start Timer %d", this->hsc->pmaker_count);
-
+                
                 std::vector<uint256_t> cmds;
                 for (auto &p: pending)
                     cmds.push_back(p.first);
 
+                hsc->timer_recv_prop.add(hsc->recv_timeout);
+                HOTSTUFF_LOG_INFO("Pacemaker : reproposing cmds = %d : Start Timer %d", cmds.size(), this->hsc->pmaker_count);
+                
                 do_new_consensus(0, cmds);
             });
         }
@@ -362,10 +364,10 @@ class PMRoundRobinProposer: virtual public PaceMaker {
                 auto &pending = hs->get_decision_waiting();
 
                 if (!pending.size()) return;
+                // HOTSTUFF_LOG_INFO("Pacemaker : reproposing");
 
-                HOTSTUFF_LOG_PROTO("reproposing pending commands");
                 hsc->timer_recv_prop.add(hsc->recv_timeout);
-                HOTSTUFF_LOG_INFO("Pacemaker : Start Timer %d", this->hsc->pmaker_count);
+                HOTSTUFF_LOG_INFO("Pacemaker : reproposing : Start Timer %d", this->hsc->pmaker_count);
             });
         }
     }
@@ -404,10 +406,7 @@ class PMRoundRobinProposer: virtual public PaceMaker {
     }
 
     promise_t beat() override {
-        HOTSTUFF_LOG_PROTO("Pacmaker : beat()");
-
-        if (!rotating && proposer == hsc->get_id())
-        {
+        if (!rotating && proposer == hsc->get_id()) {
             promise_t pm;
             pending_beats.push(pm);
             proposer_schedule_next();
@@ -416,7 +415,7 @@ class PMRoundRobinProposer: virtual public PaceMaker {
         else
             return promise_t([proposer=proposer](promise_t &pm) {
                 pm.resolve(proposer);
-            });
+        });
     }
 
     promise_t beat_resp(ReplicaID last_proposer) override {
@@ -431,8 +430,8 @@ struct PaceMakerRR: public PMHighTail, public PMRoundRobinProposer {
         PMHighTail(parent_limit),
         PMRoundRobinProposer(ec, base_timeout, prop_delay) {}
 
-    void init(HotStuffCore *hsc) override {
-        PaceMaker::init(hsc);
+    void init(HotStuffCore *hsc, size_t blk_size) override {
+        PaceMaker::init(hsc, blk_size);
         PMHighTail::init();
         PMRoundRobinProposer::init();
 
@@ -441,10 +440,12 @@ struct PaceMakerRR: public PMHighTail, public PMRoundRobinProposer {
             ReplicaID requester = this->hsc->get_id();
             RetransRequest request = RetransRequest(requester, this->hsc->pmaker_count, this->hsc);
 
-            HOTSTUFF_LOG_PROTO("Pacemaker : TIMEOUT! : sending %s to Proposer %d", std::string(request).c_str(), proposer);
-
-            if (proposer != requester)
+            if (proposer != requester) {
                 this->hsc->on_request(proposer, request);
+                HOTSTUFF_LOG_PROTO("Pacemaker : TIMEOUT! : sending %s to Proposer %d", std::string(request).c_str(), proposer);
+            }
+
+            this->hsc->recv_timeout = this->hsc->recv_timeout * 2; // Exponential Backoff
         });
 
     }

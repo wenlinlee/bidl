@@ -30,7 +30,7 @@ namespace hotstuff {
 
 /* The core logic of HotStuff, is fairly simple :). */
 /*** begin HotStuff protocol logic ***/
-HotStuffCore::HotStuffCore(ReplicaID id, privkey_bt &&priv_key):
+HotStuffCore::HotStuffCore(ReplicaID id, privkey_bt &&priv_key, double _recv_timeout):
     b0(new Block(true, 1)),
     b_lock(b0),
     b_exec(b0),
@@ -39,11 +39,14 @@ HotStuffCore::HotStuffCore(ReplicaID id, privkey_bt &&priv_key):
     tails{b0},
     vote_disabled(false),
     id(id),
-    storage(new EntityStorage()) 
+    storage(new EntityStorage()),
+    default_timeout(_recv_timeout) 
 {
     storage->add_blk(b0);
     pmaker_count = 1;
-    recv_timeout = 20.0 / 1000;
+    recv_timeout = default_timeout; // in micro-second
+    LOG_WARN("default_timeout = %.2lf", default_timeout);
+
 }
 
 void HotStuffCore::sanity_check_delivered(const block_t &blk) {
@@ -166,7 +169,9 @@ block_t HotStuffCore::on_propose(const std::vector<uint256_t> &cmds, const std::
 
     /* create the new block */
     block_t bnew = storage->add_blk(
-        new Block(parents, cmds,
+        new Block(
+            parents, 
+            cmds,
             hqc.second->clone(), 
             std::move(extra),
             parents[0]->height + 1,
@@ -175,8 +180,7 @@ block_t HotStuffCore::on_propose(const std::vector<uint256_t> &cmds, const std::
         )
     );
 
-    //LOG_PROTO("Add to storage <%d, %s>", pmaker_count, std::string(*bnew).c_str());
-    storage->add_blk(bnew, pmaker_count);
+    storage->add_blk_hash_map(pmaker_count, bnew->get_hash());
 
     const uint256_t bnew_hash = bnew->get_hash();
     bnew->self_qc = create_quorum_cert(bnew_hash);
@@ -203,18 +207,25 @@ block_t HotStuffCore::on_propose(const std::vector<uint256_t> &cmds, const std::
 }
 
 void HotStuffCore::on_receive_proposal(const Proposal &prop) {
-    timer_recv_prop.del();
-    LOG_PROTO("got %s, Stop Timer = %d", std::string(prop).c_str(), pmaker_count);
-    pmaker_count++;
-    if (pmaker_count % 5 != 0) {
-        timer_recv_prop.add(recv_timeout);
-        HOTSTUFF_LOG_INFO("Pacemaker : repeat Start Timer %d", pmaker_count);
-    }
-    else {
-        pmaker_count = 1;
-    }
-
     bool self_prop = prop.proposer == get_id();
+
+    // if (!self_prop) {
+    //     int random = rand() % 100 + 1;
+    //     if (random <= 10) { 
+    //         LOG_PROTO("Dropping %s, Timer %d", std::string(prop).c_str(), pmaker_count);
+    //         return;
+    //     }
+    // }
+
+    timer_recv_prop.del();
+    LOG_PROTO("got %s, txn = %d, Stop Timer = %d", std::string(prop).c_str(), prop.blk->cmds.size(), pmaker_count);
+    pmaker_count++;
+    recv_timeout = default_timeout;
+
+    // if (prop.blk->cmds.size() != 400 && pmaker_count % 5 != 0) {
+    //     timer_recv_prop.add(recv_timeout);
+    //     HOTSTUFF_LOG_INFO("Pacemaker : repeat Start Timer %d", pmaker_count);
+    // }
 
     block_t bnew = prop.blk;
 
@@ -291,9 +302,14 @@ void HotStuffCore::on_receive_retrans_request(const RetransRequest &request) {
     block_t blk = storage->find_blk(request.pmaker_count);
 
     if (blk != nullptr) {
-        LOG_PROTO("on_receive_retrans_request : sending proposal to %d", request.requester);
+        int count = storage->add_retrans_count(blk->get_hash());
+        if (count == -1) {
+            LOG_PROTO("on_receive_retrans_request : mutlicast reject");
+            return;
+        }
         Proposal prop(id, blk, nullptr);
         do_retransmit_prop(request.requester, prop);
+        LOG_PROTO("on_receive_retrans_request : mutlicast again %d, %s", count, std::string(prop).c_str());
     }
     else {
         LOG_PROTO("on_receive_retrans_request : no block with id = %d", request.pmaker_count);

@@ -121,7 +121,7 @@ class Block {
     std::vector<uint256_t> parent_hashes;
     std::vector<uint256_t> cmds;
     quorum_cert_bt qc;
-    bytearray_t extra;
+    bytearray_t extra; // ???
 
     /* the following fields can be derived from above */
     uint256_t hash;
@@ -221,9 +221,12 @@ struct BlockHeightCmp {
 };
 
 class EntityStorage {
-    std::unordered_map<const uint256_t, block_t> blk_cache;
-    std::unordered_map<uint64_t, block_t> blk_cache_by_id;
+    std::unordered_map<const uint256_t, block_t> blk_cache; // key = block hash, value = block
+    std::unordered_map<const uint256_t, bool> recv_blk_cache; // key = block hash, value = block
+    std::unordered_map<uint64_t, const uint256_t> hash_cache_by_pmaker_count; // key = pmaker_count, value = block hash
     std::unordered_map<const uint256_t, command_t> cmd_cache;
+    std::unordered_map<const uint256_t, bool> retrans_count_cache; // key = block hash, value = retransmission count 
+
     public:
     bool is_blk_delivered(const uint256_t &blk_hash) {
         auto it = blk_cache.find(blk_hash);
@@ -235,13 +238,34 @@ class EntityStorage {
         return blk_cache.count(blk_hash);
     }
 
+    bool is_blk_received(const uint256_t &blk_hash) {
+        return recv_blk_cache.count(blk_hash);
+    }
+
     block_t add_blk(Block &&_blk, const ReplicaConfig &/*config*/) {
         block_t blk = new Block(std::move(_blk));
         return blk_cache.insert(std::make_pair(blk->get_hash(), blk)).first->second;
     }
 
-    void add_blk(const block_t &blk, const uint64_t &pmaker_count) {
-        blk_cache_by_id.insert(std::make_pair(pmaker_count, blk));
+    int find_retrans_count(const uint256_t &blk_hash) {
+        auto it = retrans_count_cache.find(blk_hash);
+        return it == retrans_count_cache.end() ? 0 : it->second;
+    }
+
+    int add_retrans_count(const uint256_t &blk_hash) {
+        auto it = retrans_count_cache.find(blk_hash);
+        if (it != retrans_count_cache.end())
+            return -1;
+        retrans_count_cache.insert(std::make_pair(blk_hash, true));;
+        return 0;
+    }
+
+    void add_blk_hash_map(const uint64_t &pmaker_count, const uint256_t &blk_hash) {
+        hash_cache_by_pmaker_count.insert(std::make_pair(pmaker_count, blk_hash));
+    }
+
+    void add_blk_recv(const uint256_t &blk_hash) {
+        recv_blk_cache.insert(std::make_pair(blk_hash, true));
     }
 
     const block_t &add_blk(const block_t &blk) {
@@ -254,8 +278,13 @@ class EntityStorage {
     }
 
     block_t find_blk(const uint64_t &pmaker_count) {
-        auto it = blk_cache_by_id.find(pmaker_count);
-        return it == blk_cache_by_id.end() ? nullptr : it->second;
+        auto it = hash_cache_by_pmaker_count.find(pmaker_count); // return block hash
+        if (it == hash_cache_by_pmaker_count.end()) {
+            return nullptr;
+        }
+        else {
+            return find_blk(it->second);
+        }
     }
 
     bool is_cmd_fetched(const uint256_t &cmd_hash) {

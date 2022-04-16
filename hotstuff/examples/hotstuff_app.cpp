@@ -108,7 +108,7 @@ class HotStuffApp: public HotStuff {
     void state_machine_execute(const Finality &fin) override {
         reset_imp_timer();
 #ifndef HOTSTUFF_ENABLE_BENCHMARK
-        HOTSTUFF_LOG_INFO("replicated %s", std::string(fin).c_str());
+        //HOTSTUFF_LOG_INFO("replicated %s", std::string(fin).c_str());
 #endif
     }
 
@@ -131,7 +131,8 @@ class HotStuffApp: public HotStuff {
         const EventContext &ec,
         size_t nworker,
         const Net::Config &repnet_config,
-        const ClientNetwork<opcode_t>::Config &clinet_config
+        const ClientNetwork<opcode_t>::Config &clinet_config,
+        double recv_timeout
     );
 
     void start(const std::vector<std::tuple<NetAddr, bytearray_t, bytearray_t>> &reps);
@@ -168,10 +169,11 @@ int main(int argc, char **argv) {
     auto opt_fixed_proposer = Config::OptValInt::create(1);
     auto opt_base_timeout = Config::OptValDouble::create(1);
     auto opt_prop_delay = Config::OptValDouble::create(1);
+    auto opt_recv_timeout = Config::OptValDouble::create(50 / 1000);
     auto opt_imp_timeout = Config::OptValDouble::create(11);
-    auto opt_nworker = Config::OptValInt::create(1);
-    auto opt_repnworker = Config::OptValInt::create(1);
-    auto opt_repburst = Config::OptValInt::create(100);
+    auto opt_nworker = Config::OptValInt::create(1); // threads for verification pool 
+    auto opt_repnworker = Config::OptValInt::create(1);  // threads for replica send and recv
+    auto opt_repburst = Config::OptValInt::create(100); // threads for client send and recv
     auto opt_clinworker = Config::OptValInt::create(8);
     auto opt_cliburst = Config::OptValInt::create(1000);
     auto opt_notls = Config::OptValFlag::create(false);
@@ -192,6 +194,7 @@ int main(int argc, char **argv) {
     config.add_opt("proposer", opt_fixed_proposer, Config::SET_VAL, 'l', "set the fixed proposer (for dummy)");
     config.add_opt("base-timeout", opt_base_timeout, Config::SET_VAL, 't', "set the initial timeout for the Round-Robin Pacemaker");
     config.add_opt("prop-delay", opt_prop_delay, Config::SET_VAL, 't', "set the delay that follows the timeout for the Round-Robin Pacemaker");
+    config.add_opt("recv-timeout", opt_recv_timeout, Config::SET_VAL, 't', "set the timeout value for a peer waiting for a proposal");
     config.add_opt("imp-timeout", opt_imp_timeout, Config::SET_VAL, 'u', "set impeachment timeout (for sticky)");
     config.add_opt("nworker", opt_nworker, Config::SET_VAL, 'n', "the number of threads for verification");
     config.add_opt("repnworker", opt_repnworker, Config::SET_VAL, 'm', "the number of threads for replica network");
@@ -243,13 +246,16 @@ int main(int argc, char **argv) {
     else
         pmaker = new hotstuff::PaceMakerRR(ec, parent_limit, opt_base_timeout->get(), opt_prop_delay->get());
 
-    HOTSTUFF_LOG_INFO("Pacemaker Base Timeout = %f, Proposer Delay = %f", opt_base_timeout->get(), opt_prop_delay->get());
+    HOTSTUFF_LOG_INFO("Pacemaker Base Timeout = %.2lf, Proposer Delay = %.2lf, Recv Timeout = %.2lf", 
+        opt_base_timeout->get(), opt_prop_delay->get(), opt_recv_timeout->get() / 1000
+    );
 
     HotStuffApp::Net::Config repnet_config;
     ClientNetwork<opcode_t>::Config clinet_config;
     repnet_config.max_msg_size(opt_max_rep_msg->get());
     clinet_config.max_msg_size(opt_max_cli_msg->get());
 
+    // Disable TLS
     // if (!opt_tls_privkey->get().empty() && !opt_notls->get())
     // {
     //     auto tls_priv_key = new salticidae::PKey(
@@ -282,7 +288,8 @@ int main(int argc, char **argv) {
         ec,
         opt_nworker->get(),
         repnet_config,
-        clinet_config
+        clinet_config,
+        opt_recv_timeout->get() / 1000 // millisecond
     );
 
 
@@ -320,8 +327,9 @@ HotStuffApp::HotStuffApp(
     const EventContext &ec,
     size_t nworker,
     const Net::Config &repnet_config,
-    const ClientNetwork<opcode_t>::Config &clinet_config):
-        HotStuff(blk_size, idx, raw_privkey, plisten_addr, multicast_addr, std::move(pmaker), ec, nworker, repnet_config),
+    const ClientNetwork<opcode_t>::Config &clinet_config,
+    double recv_timeout):
+        HotStuff(blk_size, idx, raw_privkey, plisten_addr, multicast_addr, std::move(pmaker), ec, nworker, repnet_config, recv_timeout),
         stat_period(stat_period),
         impeach_timeout(impeach_timeout),
         ec(ec),
@@ -359,8 +367,7 @@ void HotStuffApp::client_request_cmd_handler(MsgReqCmd &&msg, const conn_t &conn
     auto cmd = parse_cmd(msg.serialized);
     const auto &cmd_hash = cmd->get_hash();  // dd: get hash
 
-    //HOTSTUFF_LOG_DEBUG("processing %s", std::string(*cmd).c_str());
-    HOTSTUFF_LOG_INFO("processing client cmd %s", std::string(*cmd).c_str());
+    //HOTSTUFF_LOG_INFO("processing client cmd %s", std::string(*cmd).c_str());
 
     exec_command(cmd_hash, [this, addr](Finality fin) {  // dd: put into the queue to be decided
         resp_queue.enqueue(std::make_pair(fin, addr));
@@ -368,13 +375,13 @@ void HotStuffApp::client_request_cmd_handler(MsgReqCmd &&msg, const conn_t &conn
 }
 
 void HotStuffApp::start(const std::vector<std::tuple<NetAddr, bytearray_t, bytearray_t>> &reps) {
-    // ev_stat_timer = TimerEvent(ec, [this](TimerEvent &) {
-    //     HotStuff::print_stat();
-    //     HotStuffApp::print_stat();
-    //     //HotStuffCore::prune(100);
-    //     ev_stat_timer.add(stat_period);
-    // });
-    // ev_stat_timer.add(stat_period);
+    ev_stat_timer = TimerEvent(ec, [this](TimerEvent &) {
+        HotStuff::print_stat();
+        HotStuffApp::print_stat();
+        //HotStuffCore::prune(100);
+        ev_stat_timer.add(stat_period);
+    });
+    ev_stat_timer.add(stat_period);
 
     impeach_timer = TimerEvent(ec, [this](TimerEvent &) {
         if (get_decision_waiting().size()) // insert at cmd_pending handler, erase at do_decide()

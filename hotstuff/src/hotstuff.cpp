@@ -111,8 +111,7 @@ bool HotStuffBase::on_deliver_blk(const block_t &blk) {
         assert(storage->is_blk_delivered(p));
     if ((valid = HotStuffCore::on_deliver_blk(blk)))
     {
-        LOG_DEBUG("block %.10s delivered",
-                get_hex(blk_hash).c_str());
+        LOG_DEBUG("block %.10s delivered", get_hex(blk_hash).c_str());
         part_parent_size += blk->get_parent_hashes().size();
         part_delivered++;
         delivered++;
@@ -203,12 +202,17 @@ promise_t HotStuffBase::async_deliver_blk(const uint256_t &blk_hash, const PeerI
 }
 
 void HotStuffBase::propose_handler(MsgPropose &&msg, const Net::conn_t &conn) {
-    const PeerId &peer = conn->get_peer_id();
-    if (peer.is_null()) return;
+    // const PeerId &peer = conn->get_peer_id();
+    // if (peer.is_null()) return;
     
     msg.postponed_parse(this);
 
     auto &prop = msg.proposal;
+
+    if (prop.proposer == get_id()) {
+        LOG_INFO("drop proposal from myself");
+        return;
+    }
 
     block_t blk = prop.blk;
 
@@ -216,12 +220,20 @@ void HotStuffBase::propose_handler(MsgPropose &&msg, const Net::conn_t &conn) {
         return;
     }
 
-    if (peer != get_config().get_peer_id(prop.proposer)) {
-        LOG_WARN("invalid proposal from %d, conn fd_udp = %d", prop.proposer, conn->get_fd_udp());
+    if (storage->is_blk_received(blk->get_hash())) {
+        LOG_INFO("drop proposal received");
         return;
     }
+    else {
+        storage->add_blk_recv(blk->get_hash());
+    }
 
-    promise::all(std::vector<promise_t>{async_deliver_blk(blk->get_hash(), peer)})
+    // if (peer != get_config().get_peer_id(prop.proposer)) {
+    //     LOG_WARN("invalid proposal conn fd_udp = %d", conn->get_fd_udp());
+    //     return;
+    // }
+
+    promise::all(std::vector<promise_t>{async_deliver_blk(blk->get_hash(), get_config().get_peer_id(prop.proposer))})
     .then([this, prop = std::move(prop)]() {
         on_receive_proposal(prop);
     });
@@ -362,8 +374,10 @@ HotStuffBase::HotStuffBase(
     pacemaker_bt pmaker,
     EventContext ec,
     size_t nworker,
-    const Net::Config &netconfig):
-        HotStuffCore(rid, std::move(priv_key)),
+    const Net::Config &netconfig,
+    double recv_timeout
+    ):
+        HotStuffCore(rid, std::move(priv_key), recv_timeout),
         listen_addr(listen_addr),
         blk_size(blk_size),
         ec(ec),
@@ -380,7 +394,8 @@ HotStuffBase::HotStuffBase(
         part_gened(0),
         part_delivery_time(0),
         part_delivery_time_min(double_inf),
-        part_delivery_time_max(0)
+        part_delivery_time_max(0),
+        cmd_pending_count(0)
 {
     /* register the handlers for msg from replicas */
     pn.reg_handler(salticidae::generic_bind(&HotStuffBase::propose_handler, this, _1, _2));
@@ -468,7 +483,7 @@ void HotStuffBase::start(std::vector<std::tuple<NetAddr, pubkey_bt, uint256_t>> 
         LOG_WARN("too few replicas in the system to tolerate any failure");
     on_init(nfaulty);
     
-    pmaker->init(this);
+    pmaker->init(this, blk_size);
 
     if (ec_loop)
         ec.dispatch();
@@ -486,11 +501,19 @@ void HotStuffBase::start(std::vector<std::tuple<NetAddr, pubkey_bt, uint256_t>> 
             else
                 e.second(Finality(id, 0, 0, 0, cmd_hash, uint256_t()));
 
-            if (proposer != get_id()) continue;
-            /* Following Operations are done by Peer */
+            if (proposer != get_id()) {
+                cmd_pending_count++;
+
+                if (cmd_pending_count >= blk_size) {
+                    timer_recv_prop.add(recv_timeout);
+                    HOTSTUFF_LOG_INFO("Pacemaker : Recv : Form Block : 400 txns, Start Timer %d", pmaker_count);
+                    cmd_pending_count -= blk_size;
+                }
+                continue;
+            }
+            /* Following Operations are done by Leader only */
 
             cmd_pending_buffer.push(cmd_hash);
-            // printf("dd: cmd_pending_buffer_size=%d\n", cmd_pending_buffer.size());
 
             if (cmd_pending_buffer.size() >= blk_size) {
                 std::vector<uint256_t> cmds;
@@ -499,6 +522,7 @@ void HotStuffBase::start(std::vector<std::tuple<NetAddr, pubkey_bt, uint256_t>> 
                     cmds.push_back(cmd_pending_buffer.front());
                     cmd_pending_buffer.pop();
                 }
+
                 
                 // when pacemaker think HotStuff is ready to issue new cmds
                 pmaker->beat().then([this, cmds = std::move(cmds)](ReplicaID proposer) {
@@ -507,13 +531,14 @@ void HotStuffBase::start(std::vector<std::tuple<NetAddr, pubkey_bt, uint256_t>> 
 #ifdef HOTSTUFF_CMD_REQSIZE    
                         int n = cmds.size();
                         int length_of_propose = n * HOTSTUFF_CMD_REQSIZE;
-                        HOTSTUFF_LOG_INFO("Propose in cmd_pending handler");
 
                         on_propose(cmds, pmaker->get_parents(), bytearray_t(length_of_propose)); 
 #else
                         on_propose(cmds, pmaker->get_parents(), bytearray_t()); 
 #endif
                     }
+                    timer_recv_prop.add(recv_timeout);
+                    HOTSTUFF_LOG_INFO("Pacemaker : Send : Form Block : 400 txns, Start Timer %d", pmaker_count);
                 });
                 return true;
             }

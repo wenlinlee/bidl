@@ -74,12 +74,13 @@ class HotStuffCore {
     public:
     // timer for broadcast and receive proposal 
     TimerEvent timer_recv_prop;
+    double default_timeout;
     double recv_timeout;
     uint64_t pmaker_count; // represents the Proposal sequence number, +1 monolithically increasing per UDP multicast
-
+ 
     BoxObj<EntityStorage> storage;
 
-    HotStuffCore(ReplicaID id, privkey_bt &&priv_key);
+    HotStuffCore(ReplicaID id, privkey_bt &&priv_key, double recv_timeout);
     virtual ~HotStuffCore() {
         b0->qc_ref = nullptr;
     }
